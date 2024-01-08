@@ -1,198 +1,623 @@
+use std::{char, iter::Peekable, str::Chars, result};
+
 use log::{debug, error, trace, warn};
-use pest::{
-    iterators::{Pair, Pairs},
-    Parser,
-};
-use pest_derive::Parser;
 
-use crate::css::{CSSCombinator, CSSword, CSS};
-
-#[derive(Parser)]
-#[grammar = "css.pest"]
-pub struct CSSParser;
-
-pub fn parse(input: &str) -> Result<CSS, String> {
-    debug!("Initialisation de la structure CSS");
-    let mut css_res = CSS::new();
-    let file;
-
-    debug!("Début de l'analyse syntaxique");
-    match CSSParser::parse(Rule::file, input) {
-        Ok(mut p_ress) => {
-            trace!("{:#?}", p_ress);
-            file = p_ress.next().unwrap(); // si le parsing est passé alors file est présent et à
-                                           // des enfants
-        }
-        Err(err) => {
-            error!("{}", err);
-            return Err(err.to_string());
-        }
-    }
-
-    for line in file.into_inner() {
-        match line.as_rule() {
-            Rule::mono_rule => {
-                // un mono rule est de la forme monorule[mono_start[nom var], mono_value[value]]
-                // on peut donc faire 2 unwrap + inner d'affiler
-                let mut iter = line.into_inner();
-                let mono_key = iter.next().unwrap().into_inner().as_str();
-                let mono_value = iter.next().unwrap().into_inner().next().unwrap().as_str();
-                css_res
-                    .mono_rules
-                    .insert(mono_key.to_string(), mono_value.to_string());
-                debug!("mono_rule trouvé : {} {}", mono_key, mono_value);
-            }
-            Rule::variable => {
-                if let Ok((name, vale)) = parse_variable(line.clone().into_inner()) {
-                    css_res.variable.insert(name.to_string(), vale.to_string());
-                    debug!("variable : {} = {}", name, vale);
-                } else {
-                    warn!("la lecture de la variable a échoué {}", line);
-                }
-            }
-            Rule::rule => {
-                // une rule est composé de un selecteur et un block donc pas de problème pour
-                // unwrap.
-                let mut iter = line.into_inner();
-                let _selec = parse_selecteur(iter.next().unwrap().into_inner());
-                debug!("version parser : {}", _selec);
-                let _block = iter.next().unwrap();
-            }
-            Rule::EOI => (),
-            _ => {
-                warn!("paire non implémenter {}", line);
-            }
-        }
-    }
-
-    Ok(css_res)
+// https://drafts.csswg.org/css-syntax/#tokenization
+#[derive(Debug)]
+enum HashTokenFlag {
+    Id,
+    Unrestricted,
 }
 
-fn parse_selecteur(selecteur_token: Pairs<'_, Rule>) -> CSSCombinator {
-    
-    let mut parse_selec: CSSCombinator = CSSCombinator::None;
+#[derive(Debug)]
+enum NumericValue {
+    Integer,
+    Number,
+}
 
-    debug!("selecteur a parser {}", selecteur_token);
+#[derive(Debug)]
+enum CssToken {
+    IdentToken(String),
+    FunctionToken(String),
+    AtKeywordToken(String),
+    HashToken { flag: HashTokenFlag, value: String },
+    StringToken(String),
+    UrlToken(String),
+    BadStringToken,
+    BadUrlToken,
+    DelimToken(char),
+    NumberToken { sign: bool, val_type: NumericValue, value: String },
+    PercentageToken { sign: bool, value: String },
+    DimensionToken { unit: String, sign: bool, val_type: NumericValue, value: String},
+    UnicodeRangeToken,
+    WhitespaceToken,
+    CdoToken,
+    CdcToken,
+    ColonToken,
+    SemicolonToken,
+    CommaToken,
+    CrochetOpToken,
+    CrochetClToken,
+    ParenthOpToken,
+    ParenthClToken,
+    AcoladeOpToken,
+    AcoladeClToken,
+}
 
-    for token in selecteur_token {
-        debug!("{}", token);
-        match token.as_rule() {
-            Rule::selecteur_combinator => {
-                if matches!(parse_selec, CSSCombinator::None) {
-                    warn!("Un opérateur de combinaison est présent mais il n'existe pas de sélecteur précédent {}", token.as_str());
-                } else {
-                    let mut iter_tok = token.into_inner();
-                    // un combinator est de la forme : selecteur_combinator, [selecteur_op(operateur), selecteur...]
-                    // on peut donc unwrap le premier et passer le reste à parser.
-                    
-                    let op = iter_tok.next().unwrap().into_inner().next().unwrap().as_rule();
-                    let left_selec = parse_selecteur(iter_tok);
+// https://drafts.csswg.org/css-syntax/#input-preprocessing
+#[allow(dead_code)]
+fn preprocessing(input: String) -> String {
+    //
+    let mut preprocess_input = input.replace("\r\n", "\n");
+    preprocess_input = preprocess_input.replace("\r", "\n");
+    preprocess_input = preprocess_input.replace("\x0c", "\n");
+    preprocess_input.replace("\x00", "�")
+}
 
-                    if matches!(left_selec, CSSCombinator::None) {
-                        warn!("la seconde partie du combinator n'est pas présent");
+// https://drafts.csswg.org/css-syntax/#consume-token
+#[allow(dead_code)]
+fn tokenization(input: String) -> Result<Vec<CssToken>, String> {
+    let mut tokens = Vec::new();
+
+    let mut it = input.chars().peekable();
+    while let Some(&current_input) = it.peek() {
+        match current_input {
+            '\n' | '\t' | ' ' => {
+                consume_whitespaces(&mut it);
+                tokens.push(CssToken::WhitespaceToken);
+            }
+            '"' | '\'' => {
+                it.next();
+                tokens.push(consume_string_token(&mut it, current_input));
+            }
+            '#' => {
+                // todo
+            }
+            '\\' => {
+                it.next();
+                if let Some(&next_char) = it.peek() {
+                    if next_char != '\n' {
+                        // ident like token
+                        it.next_back();
+                        tokens.push(consume_ident_like_token(&mut it));
                     } else {
-                        parse_selec = combinator_builder(op, parse_selec, left_selec);
+                        tokens.push(CssToken::DelimToken(current_input));
                     }
                 }
             }
-            Rule::selecteur_atomic => {
-                parse_selec = CSSCombinator::Unit(parse_selector_atomique(token.into_inner()));
+            '+' => {
+                // todo
+            }
+            '-' => {
+                // todo
+            }
+            '0'..='9' => {
+                tokens.push(consume_numeric_token(&mut it));
+            }
+            '@' => {
+                it.next();
+                if check_start_ident_sequence(&mut it) {
+                    tokens.push(CssToken::AtKeywordToken(consume_ident_sequence(&mut it)));
+                } else {
+                    tokens.push(CssToken::DelimToken(current_input));
+                }
+            }
+            '.' => {
+                // todo
+            }
+            '<' => {
+                // todo
+            }
+            'U' | 'u' => {
+                // todo
+            }
+            '(' => {
+                it.next();
+                tokens.push(CssToken::ParenthOpToken);
+            }
+            ')' => {
+                it.next();
+                tokens.push(CssToken::ParenthClToken);
+            }
+            '[' => {
+                it.next();
+                tokens.push(CssToken::CrochetOpToken);
+            }
+            ']' => {
+                it.next();
+                tokens.push(CssToken::CrochetClToken);
+            }
+            '{' => {
+                it.next();
+                tokens.push(CssToken::AcoladeOpToken);
+            }
+            '}' => {
+                it.next();
+                tokens.push(CssToken::AcoladeClToken);
+            }
+            ',' => {
+                it.next();
+                tokens.push(CssToken::CommaToken);
+            }
+            ':' => {
+                it.next();
+                tokens.push(CssToken::ColonToken);
+            }
+            ';' => {
+                it.next();
+                tokens.push(CssToken::SemicolonToken);
             }
             _ => {
-                warn!("token {:#?} inconnu pour un selecteur", token.as_rule());
+                if is_ident_start_code_point(current_input) {
+                    tokens.push(consume_ident_like_token(&mut it));
+                } else {
+                it.next();
+                tokens.push(CssToken::DelimToken(current_input));}
+            }
+        }
+    }
+
+    Ok(tokens)
+}
+
+/// Take the input stream and consume all of the whitespace.
+fn consume_whitespaces(it: &mut Peekable<Chars<'_>>) {
+    while let Some(&wp) = it.peek() {
+        if is_whitespace(wp) {
+            it.next();
+        } else {
+            break;
+        }
+    }
+}
+
+/// https://drafts.csswg.org/css-syntax/#consume-ident-like-token
+fn consume_ident_like_token(it: &mut Peekable<Chars<'_>>) -> CssToken {
+    let string = consume_ident_sequence(it);
+
+    it.next();
+
+    if matches!(string.to_lowercase().as_str(), "url") {
+        if let Some(&current_char) = it.peek() {
+            if current_char == '(' {
+                it.next();
+                consume_whitespaces(it);
+                if next_char_is_quote(it) {
+                    return CssToken::FunctionToken(string);
+                } else {
+                    return consume_url_token(it);
+                }
+            }
+        }
+    } else if let Some(&current_char) = it.peek() {
+        if current_char == '(' {
+            it.next();
+            return CssToken::FunctionToken(string);
+        }
+    }
+
+    return CssToken::IdentToken(string);
+}
+
+/// https://drafts.csswg.org/css-syntax/#consume-a-numeric-token
+fn consume_numeric_token(it: &mut Peekable<Chars<'_>>) -> CssToken {
+    let number = consume_number(it);
+    let CssToken::NumberToken { sign, val_type, value } = number else {
+        error!("Unknow error a number consuming go wrong {:#?}", number);
+        todo!()
+    };
+
+    if check_start_ident_sequence(it) {
+        let unit = consume_ident_sequence(it);
+        return CssToken::DimensionToken { unit, sign, val_type, value };
+    } else if next_char_is_x(it, '%') {
+        return CssToken::PercentageToken { sign, value };
+    } else {
+        return CssToken::NumberToken { sign, val_type, value };
+    }
+}
+
+/// Consume a String token with is ending_char.
+/// https://drafts.csswg.org/css-syntax/#consume-string-token
+fn consume_string_token(it: &mut Peekable<Chars<'_>>, ending_char: char) -> CssToken {
+    let mut string = String::new();
+    while let Some(&curr_input) = it.peek() {
+        it.next();
+        if ending_char == curr_input {
+            it.next();
+            break;
+        }
+        match curr_input {
+            '\n' | '\t' | ' ' => {
+                it.next_back();
+                return CssToken::BadStringToken;
+            }
+            '\\' => {
+                it.next();
+                if let Some(&next_char) = it.peek() {
+                    if next_char != '\n' {
+                        string.push(curr_input);
+                        string.push(next_char);
+                    }
+                }
+            }
+            _ => string.push(curr_input),
+        }
+    }
+
+    CssToken::StringToken(string)
+}
+
+
+/// https://drafts.csswg.org/css-syntax/#consume-a-url-token
+fn consume_url_token(it: &mut Peekable<Chars<'_>>) -> CssToken {
+    let mut url = String::new();
+    consume_whitespaces(it);
+    while let Some(&current_char) = it.peek() {
+        match current_char {
+            ')' => {
+                it.next();
+                return CssToken::UrlToken(url);
+            }
+            '\n' | '\t' | ' ' => {
+                consume_whitespaces(it);
+            }
+            '\''
+            | '"'
+            | '('
+            | '\u{000B}'
+            | '\u{007F}'
+            | '\u{0000}'..='\u{0008}'
+            | '\u{000E}'..='\u{001F}' => {
+                consume_remnants_bad_url(it);
+                return CssToken::BadUrlToken;
+            }
+            '\\' => {
+                if start_valid_escape(it) {
+                    url.push(consume_escaped_code_point(it));
+                    it.next();
+                } else {
+                    consume_remnants_bad_url(it);
+                    return CssToken::BadUrlToken;
+                }
+            }
+            _ => {
+                url.push(current_char);
+                it.next();
+            }
+        }
+    }
+
+    CssToken::UrlToken(url)
+}
+
+// https://drafts.csswg.org/css-syntax/#consume-an-ident-sequence
+fn consume_ident_sequence(it: &mut Peekable<Chars<'_>>) -> String {
+    let mut result = String::new();
+
+    while let Some(&current_char) = it.peek() {
+        match current_char {
+            '_'
+            | '-'
+            | '\u{00B7}'
+            | '\u{200C}'
+            | '\u{200D}'
+            | '\u{203F}'
+            | '\u{2040}'
+            | 'a'..='z'
+            | 'A'..='Z'
+            | '0'..='9'
+            | '\u{00C0}'..='\u{00D6}'
+            | '\u{00D8}'..='\u{00F6}'
+            | '\u{00F8}'..='\u{037D}'
+            | '\u{037F}'..='\u{1FFF}'
+            | '\u{2070}'..='\u{218F}'
+            | '\u{2C00}'..='\u{2FEF}'
+            | '\u{3001}'..='\u{D2FF}'
+            | '\u{F900}'..='\u{FDCF}'
+            | '\u{FDF0}'..='\u{FFFD}' => {
+                it.next();
+                result.push(current_char);
+            }
+            '\\' => {
+                if start_valid_escape(it) {
+                    it.next();
+                    result.push(consume_escaped_code_point(it));
+                }
+            }
+            _ => {
+                if current_char > '\u{10000}' {
+                    result.push(current_char);
+                    it.next();
+                } else {
+                    it.next_back();
+                    return result;
+                }
+            }
+        }
+    }
+    result
+}
+
+/// https://drafts.csswg.org/css-syntax/#consume-a-number
+fn consume_number(it: &mut Peekable<Chars<'_>>) -> CssToken {
+    let mut type_num = false; // false integer, true number
+    let mut sign = true; // tue +, false -; default true
+    let mut number = String::new();
+
+    while let Some(&current_char) = it.peek() {
+        match current_char {
+            '+' => {
+                it.next();
+            }
+            '-' => {
+                sign = false;
+                it.next();
+            }
+            '0'..='9' => {
+                number.push(current_char);
+                it.next();
+            }
+            '.' => {
+                it.next();
+                if let Some(&next_char) = it.peek() {
+                    if is_digit(next_char) {
+                        number.push(current_char);
+                        number.push_str(consume_digit(it).as_str());
+                        type_num = true;
+                    } else {
+                        it.next_back();
+                        break;
+                    }
+                } else {
+                    it.next_back();
+                    break;
+                }
+            }
+            'e' | 'E' => {
+                // ! Erreur possible besoins de vérifier les 2 char mais 1 seul de fais
+                if next_char_is(it, |x| matches!(x, '+' | '-' | '0'..='9')) {
+                    number.push(current_char.to_ascii_lowercase());
+                    number.push_str(consume_digit(it).as_mut_str());
+                } else {
+                    break;
+                }
+            }
+            _ => break
+        }
+    }
+
+    if type_num {
+        CssToken::NumberToken { sign, value: number, val_type: NumericValue::Number }
+    } else {
+        CssToken::NumberToken { sign, value: number, val_type: NumericValue::Integer }
+    }
+}
+
+/// https://drafts.csswg.org/css-syntax/#consume-an-escaped-code-point
+fn consume_escaped_code_point(it: &mut Peekable<Chars<'_>>) -> char {
+    if let Some(&current_char) = it.peek() {
+        if is_hex_digit(current_char) {
+            let mut hex_value = String::new();
+            hex_value.push(current_char);
+            it.next();
+            let mut count = 0;
+            while let Some(&next_char) = it.peek() {
+                if !is_hex_digit(next_char) && count < 5 {
+                    break;
+                }
+                hex_value.push(next_char);
+                it.next();
+                count += 1;
+            }
+
+            // already check that the char is in the hexrange
+            let value = u32::from_str_radix(&hex_value, 16).unwrap();
+
+            if value == 0 || is_a_surrogate_hex(value) || is_max_allowed_code_point_hex(value) {
+                return '\u{FFFD}';
+            } else {
+                return char::from_u32(value).unwrap();
+            }
+        } else {
+            return current_char;
+        }
+    } else {
+        // EOF parsing error
+        return '\u{FFFD}';
+    }
+}
+
+/// https://drafts.csswg.org/css-syntax/#starts-with-a-valid-escape
+fn start_valid_escape(it: &mut Peekable<Chars<'_>>) -> bool {
+    if let Some(&first_char) = it.peek() {
+        if first_char != '\\' {
+            return false;
+        }
+        it.next();
+        if let Some(&second_char) = it.peek() {
+            it.next_back(); // reset to is origin place for future
+            if second_char == '\u{000A}' {
+                return false;
+            } else {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+/// https://drafts.csswg.org/css-syntax/#check-if-three-code-points-would-start-an-ident-sequence
+fn check_start_ident_sequence(it: &mut Peekable<Chars<'_>>) -> bool {
+    if let Some(&first_code) = it.peek() {
+        match first_code {
+            '\u{002D}' => {
+                it.next();
+                if let Some(&second_char) = it.peek() {
+                    if is_ident_start_code_point(second_char) || second_char == '\u{002D}' || start_valid_escape(it) {
+                        it.next_back();
+                        return true;
+                    }
+                }
+                it.next_back();
+                return false;
+            }
+            '\\' => {
+                return start_valid_escape(it);
+            }
+            _ => {
+                return is_ident_start_code_point(first_code);
+            }
+        }
+    }
+
+    false
+}
+
+/// https://drafts.csswg.org/css-syntax/#consume-the-remnants-of-a-bad-url
+fn consume_remnants_bad_url(it: &mut Peekable<Chars<'_>>) {
+    while let Some(&current_char) = it.peek() {
+        match current_char {
+            ')' => {
+                it.next();
                 break;
             }
-        }
-        debug!("result {}", parse_selec);
-    }
-
-    parse_selec
-}
-
-
-/// A partir de 2 Sélecteur et d'un opétateur renvoie le sélecteur correspondant
-fn combinator_builder(op_token: Rule, right: CSSCombinator, left: CSSCombinator) -> CSSCombinator {
-    match op_token {
-        Rule::list => CSSCombinator::List(vec![right, left]),
-        Rule::wp => CSSCombinator::Child((Box::new(right), Box::new(left))),
-        Rule::sup => CSSCombinator::DirectChild((Box::new(right), Box::new(left))),
-        Rule::neightbour => CSSCombinator::Neightbour((Box::new(right), Box::new(left))),
-        Rule::direct_neightbour => CSSCombinator::DirectNeightbour((Box::new(right), Box::new(left))),
-        _ => {
-            warn!("Combinator Builder Token inattendue {:#?}", op_token);
-            // la première partie est non vide
-            if !matches!(right, CSSCombinator::None) {
-                return right;
+            '\\' => {
+                consume_escaped_code_point(it);
+                it.next();
             }
-            return CSSCombinator::None;
+            _ => {
+                it.next();
+            }
         }
     }
 }
 
-/// Parse les sélecteurs atomique càd les sélecteurs qui ne sont pas > + ~ , \whitespace
-fn parse_selector_atomique(selecteur_token: Pairs<'_, Rule>) -> CSSword {
-    let mut selecteur: CSSword = CSSword::new();
-    for selec in selecteur_token {
-        match selec.as_rule() {
-            Rule::balise => selecteur.tag = Some(selec.as_str().to_string()),
-            Rule::id => selecteur.id = Some(extract_1st_token_as_string(selec)),
-            Rule::class => selecteur.class.push(extract_1st_token_as_string(selec)),
-            Rule::ps_class => selecteur.psd_class.push(extract_1st_token_as_string(selec)),
-            Rule::ps_elmnt => selecteur.psd_elt.push(extract_1st_token_as_string(selec)),
-            _ => warn!(
-                "Token {:#?} inconnu pour un selecteur atomic",
-                selec.as_rule()
-            ),
-        }
-    }
+// --- utils ---
 
-    selecteur
-}
+/// Consume a chunk of digit.
+pub fn consume_digit(it: &mut Peekable<Chars<'_>>) -> String {
+    let mut result = String::new();
 
-/// Tente de parser une variable css prend une liste sortie d'un token variable
-/// (variable [(var_name, [name, separator]), var_val]) et en resort un couple : nom, valeur.
-fn parse_variable(var_token: Pairs<'_, Rule>) -> Result<(String, String), &str> {
-    let mut name = None;
-    let mut val = None;
-    for token in var_token {
-        match token.as_rule() {
-            Rule::var_name => name = Some(extract_1st_token_as_string(token)),
-            Rule::var_val => val = Some(token.as_str().to_string()),
-            _ => warn!("token inattendu {}", token),
-        }
-    }
-
-    if name.is_none() || val.is_none() {
-        return Err("Les 2 valeurs requises sont inconnues.");
-    }
-
-    // déja vérifier si l'un des 2 est none
-    Ok((name.unwrap(), val.unwrap()))
-}
-
-/// Extrait le premier token interne et le renvoie en String. Considère que le token est toujours
-/// présent sinon panic (les token sont censé être maîtriser).
-fn extract_1st_token_as_string(token: Pair<'_, Rule>) -> String {
-    token.into_inner().next().unwrap().as_str().to_string()
-}
-
-#[cfg(test)]
-mod tests {
-    use pest::Parser;
-
-    use crate::parser::parse_variable;
-
-    use super::{CSSParser, Rule};
-
-    #[test]
-    fn variable() {
-        if let Ok(mut token) = CSSParser::parse(Rule::variable, "--ok: zz;") {
-            assert_eq!(
-                parse_variable(token.next().unwrap().into_inner()),
-                Ok(("ok".to_string(), "zz".to_string()))
-            );
+    while let Some(&current_char) = it.peek() {
+        if is_digit(current_char) {
+            result.push(current_char);
+            it.next();
         } else {
-            assert_eq!(false, true, "problème de parsing dans le text");
+            break;
         }
     }
+
+    result
+}
+
+#[inline]
+pub fn next_char_is(it: &mut Peekable<Chars<'_>>, f: fn(char) -> bool) -> bool {
+    it.next();
+    if let Some(&next_char) = it.peek() {
+        return f(next_char);
+    }
+    it.next_back();
+    false
+}
+
+/// Check if the next char is x
+#[inline]
+pub fn next_char_is_x(it: &mut Peekable<Chars<'_>>, x: char) -> bool {
+    it.next();
+    if let Some(&next_char) = it.peek() {
+        return next_char == x;
+    }
+    it.next_back();
+    false
+}
+
+/// Check if a char is string gard ' or ".
+#[inline]
+pub fn next_char_is_quote(it: &mut Peekable<Chars<'_>>) -> bool {
+    next_char_in(it, &['"', '\''])
+}
+
+/// Check if the next char is in the given array.
+#[inline]
+pub fn next_char_in(it: &mut Peekable<Chars<'_>>, x: &[char]) -> bool {
+    it.next();
+    if let Some(next_char) = it.peek() {
+        return x.contains(next_char);
+    }
+    it.next_back();
+    false
+}
+
+#[inline]
+pub fn is_whitespace(char_check: char) -> bool {
+    matches!(char_check, '\n' | '\t' | ' ')
+}
+
+/// Check if a char is a digit
+#[inline]
+pub fn is_digit(char_check: char) -> bool {
+    matches!(char_check, '0'..='9')
+}
+
+#[inline]
+pub fn is_hex_digit(char_check: char) -> bool {
+    matches!(char_check, '0'..='9' | 'a'..='z' | 'A'..='Z')
+}
+
+#[inline]
+pub fn is_letter(char_check: char) -> bool {
+    matches!(char_check, 'a'..='z' | 'A'..='Z')
+}
+
+#[inline]
+pub fn is_non_ascii_ident(char_check: char) -> bool {
+    matches!(char_check, 
+    '\u{00B7}'
+            | '\u{200C}'
+            | '\u{200D}'
+            | '\u{203F}'
+            | '\u{2040}'
+            | '\u{00C0}'..='\u{00D6}'
+            | '\u{00D8}'..='\u{00F6}'
+            | '\u{00F8}'..='\u{037D}'
+            | '\u{037F}'..='\u{1FFF}'
+            | '\u{2070}'..='\u{218F}'
+            | '\u{2C00}'..='\u{2FEF}'
+            | '\u{3001}'..='\u{D2FF}'
+            | '\u{F900}'..='\u{FDCF}'
+            | '\u{FDF0}'..='\u{FFFD}') || char_check > '\u{10000}'
+}
+
+/// https://drafts.csswg.org/css-syntax/#ident-start-code-point
+#[inline]
+fn is_ident_start_code_point(char_check: char) -> bool {
+    is_letter(char_check) || is_non_ascii_ident(char_check) || char_check == '_'
+}
+
+// --- hex ---
+
+/// https://infra.spec.whatwg.org/#surrogate
+#[inline]
+fn is_a_surrogate_hex(char_value: u32) -> bool {
+    is_a_leading_surrogate_hex(char_value) || is_a_trailing_surrogate_hex(char_value)
+}
+
+/// https://infra.spec.whatwg.org/#leading-surrogate
+#[inline]
+fn is_a_leading_surrogate_hex(char_value: u32) -> bool {
+    char_value >= 0xD800 && char_value <= 0xDBFF
+}
+
+/// https://infra.spec.whatwg.org/#trailing-surrogate
+#[inline]
+pub fn is_a_trailing_surrogate_hex(char_value: u32) -> bool {
+    char_value >= 0xDC00 && char_value <= 0xDFFF
+}
+
+/// https://drafts.csswg.org/css-syntax/#maximum-allowed-code-point
+#[inline]
+fn is_max_allowed_code_point_hex(char_value: u32) -> bool {
+    char_value > 0x10FFFF
 }
