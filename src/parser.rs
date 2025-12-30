@@ -85,6 +85,24 @@ impl CssStyleSheet {
     }
 }
 
+impl From<Vec<Rule>> for CssStyleSheet {
+    fn from(rules: Vec<Rule>) -> CssStyleSheet {
+        CssStyleSheet {
+            type_sheet: "StyleSheet".to_string(),
+            location: "".to_string(),
+            parent: None,
+            title: "".to_string(),
+            alternate: false,
+            disabled: false,
+            rules,
+            origin_clean: false,
+            constructed: false,
+            disallow_modification: false,
+            base_url: "".to_string(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum ParseError {
     GetFileError(utils::ReadFileError),
@@ -101,13 +119,30 @@ impl From<utils::ReadFileError> for ParseError {
 }
 
 /// <https://drafts.csswg.org/css-syntax/#consume-stylesheet-contents>
-pub fn parse_stylesheet(url: Url) -> Result<CssStyleSheet, ParseError> {
+pub fn parse_stylesheet_url(url: Url) -> Result<CssStyleSheet, ParseError> {
     let datastream = utils::get_data(&url)?;
-    let mut rules: Vec<Rule> = Vec::new();
     debug!("File get");
 
+    let res = parse_string(datastream);
+
+    match res {
+        Ok(rules) => Ok(CssStyleSheet::new(url, rules)),
+        Err(err) => Err(err),
+    }
+}
+
+pub fn parse_stylesheet(datastream: String) -> Result<CssStyleSheet, ParseError> {
+    match parse_string(datastream) {
+        Ok(rules) => Ok(CssStyleSheet::from(rules)),
+        Err(err) => Err(err),
+    }
+}
+
+/// The real parser brain, parse a StyleSheet stocked in a string
+fn parse_string(datastream: String) -> Result<Vec<Rule>, ParseError> {
     let mut token_stream = normalize(datastream);
     debug!("Stream tokenize");
+    let mut rules: Vec<Rule> = Vec::new();
     while let Some(token) = token_stream.peek() {
         match token {
             CssToken::WhitespaceToken | CssToken::CdcToken | CssToken::CdoToken => {
@@ -116,17 +151,21 @@ pub fn parse_stylesheet(url: Url) -> Result<CssStyleSheet, ParseError> {
             CssToken::AtKeywordToken(_) => {
                 if let Some(rule) = consume_at_rule(&mut token_stream, false) {
                     rules.push(rule);
+                } else {
+                    debug!("at_ruled failed");
                 }
             }
             _ => {
                 if let Some(rule) = consume_qualified_rule(&mut token_stream, None, false) {
                     rules.push(rule);
+                } else {
+                    debug!("qualified_rule failed");
                 }
             }
         }
     }
 
-    Ok(CssStyleSheet::new(url, rules))
+    Ok(rules)
 }
 
 /// <https://drafts.csswg.org/css-syntax/#consume-at-rule>
@@ -150,7 +189,6 @@ pub fn parse_stylesheet(url: Url) -> Result<CssStyleSheet, ParseError> {
 /// * anything else
 ///     * Consume a component value from input and append the returned value to rule’s prelude.
 fn consume_at_rule(tokens: &mut impl StreamIterator<CssToken>, nested: bool) -> Option<Rule> {
-    debug!("consume_at_rule");
     if let Some(CssToken::AtKeywordToken(name)) = tokens.peek() {
         tokens.next();
         let mut prelude: Vec<ComponentValue> = Vec::new();
@@ -160,7 +198,7 @@ fn consume_at_rule(tokens: &mut impl StreamIterator<CssToken>, nested: bool) -> 
         while let Some(token) = tokens.peek() {
             match token {
                 CssToken::SemicolonToken => {
-                    debug!("consume_at_rule end");
+                    debug!("ameno");
                     tokens.next();
                     if !child_rules.is_empty() || !declarations.is_empty() {
                         return Some(Rule::BlockAtRule {
@@ -485,7 +523,6 @@ fn consume_qualified_rule(
     stop_token: Option<CssToken>,
     nested: bool,
 ) -> Option<Rule> {
-    debug!("consume_qualified_rule");
     let mut prelude: Vec<ComponentValue> = Vec::new();
 
     if let Some(token) = tokens.peek() {
@@ -507,7 +544,6 @@ fn consume_qualified_rule(
                     if prefix == "-" {}
                 } else {
                     let (declarations, rules) = consume_block(tokens);
-                    debug!("consume_qualified_rule end");
                     return Some(Rule::QualifiedRule {
                         component_value: Vec::new(),
                         declarations,
@@ -656,7 +692,8 @@ fn consume_simple_bloc(
 /// If input is a string, then filter code points from input, tokenize the result, then create a new token stream with those tokens as its tokens, and return it.
 ///
 /// Assert: Only the preceding types should be passed as input.
-pub fn normalize(input: String) -> impl StreamIterator<CssToken> {
+fn normalize(input: String) -> TokenStream {
+    //impl StreamIterator<CssToken> {
     let mut input_stream = CharStream::new(preprocessing(input));
     let mut tokens: Vec<CssToken> = Vec::new();
 
@@ -685,11 +722,15 @@ pub fn normalize(input: String) -> impl StreamIterator<CssToken> {
 mod parser_test {
     use std::{env, fs::File, io::Read};
 
+    use log::{debug, error, info};
     use url::Url;
 
-    use crate::{parser::parse_stylesheet, utils::test_utils::init_test_logger};
+    use crate::{
+        parser::{parse_stylesheet, parse_stylesheet_url},
+        utils::test_utils::init_test_logger,
+    };
 
-    use super::normalize;
+    use super::{consume_at_rule, consume_function, consume_simple_bloc, normalize};
 
     #[test]
     fn normalize_test() {
@@ -704,13 +745,97 @@ mod parser_test {
     }
 
     #[test]
-    fn basic_parse_test() {
+    fn simple_block_test() {
+        init_test_logger();
+
+        let simple_block = "{
+            color: white;
+        }";
+        let mut tokens = normalize(simple_block.to_string());
+
+        let res = consume_simple_bloc(&mut tokens);
+
+        match res {
+            Err(err) => {
+                info!("error for parsing this block {:#?}", err);
+                assert!(false);
+            }
+            Ok(_) => {
+                assert!(true);
+            }
+        }
+    }
+
+    #[test]
+    fn function_test() {
+        init_test_logger();
+
+        let simple_function = "circle(50px)";
+        let mut tokens = normalize(simple_function.to_string());
+        info!("{:#?}", tokens);
+
+        let res = consume_function(&mut tokens);
+
+        match res {
+            Err(err) => {
+                info!("error for parsing this function {:#?}", err);
+                assert!(false)
+            }
+            Ok(res) => {
+                info!("{:#?}", res);
+                assert!(true)
+            }
+        }
+    }
+
+    #[test]
+    fn at_rule_test() {
+        init_test_logger();
+
+        let at_input = "@charset utf8;";
+        let mut tokens = normalize(at_input.to_string());
+
+        let res = consume_at_rule(&mut tokens, false);
+        match res {
+            None => {
+                error!("error no rule can be parsed");
+                
+                assert!(false);
+            }
+            Some(_rule) => {
+                assert!(true)
+            }
+        }
+    }
+
+    #[test]
+    fn balise_color_test() {
+        init_test_logger();
+        let css = "a {
+            color: white;
+        }";
+
+        let _res = parse_stylesheet(css.to_string());
+    }
+
+    #[test]
+    fn global_url_parse_test() {
         init_test_logger();
 
         let work_dir = env::current_dir().unwrap();
         let location =
             Url::from_file_path(format!("{}/test/style.css", work_dir.display())).unwrap();
-        let res = parse_stylesheet(location);
+        let res = parse_stylesheet_url(location);
         log::debug!("{:#?}", res);
+        match res {
+            Err(err) => {
+                log::error!("{:#?}", err);
+                assert!(false)
+            }
+            Ok(parsed_css) => {
+                assert_eq!("StyleSheet", parsed_css.type_sheet);
+                assert_ne!(0, parsed_css.rules.len())
+            }
+        }
     }
 }

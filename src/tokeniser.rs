@@ -249,8 +249,6 @@ fn consume_whitespaces(it: &mut impl StreamIterator<char>) {
 fn consume_ident_like_token(it: &mut impl StreamIterator<char>) -> CssToken {
     let string = consume_ident_sequence(it);
 
-    it.next();
-
     if matches!(string.to_lowercase().as_str(), "url") {
         if let Some(current_char) = it.peek() {
             if current_char == '(' {
@@ -269,7 +267,6 @@ fn consume_ident_like_token(it: &mut impl StreamIterator<char>) -> CssToken {
             return CssToken::FunctionToken(string);
         }
     }
-    it.back(); // search by next has failed
 
     return CssToken::IdentToken(string);
 }
@@ -853,13 +850,16 @@ mod tests {
             consume_whitespaces, preprocessing, start_ident_sequence, start_number, CssToken,
             NumericValue,
         },
-        utils::{test_utils, CharStream, StreamIterator},
+        utils::{
+            test_utils::{self},
+            CharStream, StreamIterator,
+        },
     };
 
-    use super::{consume_ident_sequence, consume_remnants_bad_url, tokenization};
+    use super::{consume_ident_like_token, consume_ident_sequence, consume_remnants_bad_url};
 
     #[test]
-    fn test_preprocessing() {
+    fn preprocessing_test() {
         test_utils::init_test_logger();
 
         assert_eq!(
@@ -884,7 +884,7 @@ mod tests {
     }
 
     #[test]
-    fn test_whitespace() {
+    fn whitespace_test() {
         let text = String::from("     )  ");
         let mut stream = CharStream::new(text);
         consume_whitespaces(&mut stream);
@@ -897,7 +897,7 @@ mod tests {
     }
 
     #[test]
-    fn test_number() {
+    fn number_test() {
         test_utils::init_test_logger();
 
         // number consume by chunk
@@ -1084,7 +1084,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ident_sequence() {
+    fn ident_sequence_test() {
         test_utils::init_test_logger();
 
         // start ident sequence
@@ -1121,11 +1121,16 @@ mod tests {
             let mut stream = CharStream::new(text);
             assert_eq!("utf-8", consume_ident_sequence(&mut stream));
             assert_eq!(Some(';'), stream.peek());
+
+            let text = String::from("circle(50%)");
+            let mut stream = CharStream::new(text);
+            assert_eq!("circle", consume_ident_sequence(&mut stream));
+            assert_eq!(Some('('), stream.peek());
         }
     }
 
     #[test]
-    fn test_escaped() {
+    fn escaped_test() {
         test_utils::init_test_logger();
 
         debug!("parsing error");
@@ -1161,7 +1166,7 @@ mod tests {
     }
 
     #[test]
-    fn test_url() {
+    fn url_test() {
         test_utils::init_test_logger();
         // test bad url recovery
         {
@@ -1180,5 +1185,18 @@ mod tests {
             consume_remnants_bad_url(&mut stream);
             assert_eq!(None, stream.peek());
         }
+    }
+
+    #[test]
+    fn ident_like_token_test() {
+        test_utils::init_test_logger();
+
+        let text = String::from("circle(50px);");
+        let mut stream = CharStream::new(text);
+        assert_eq!(
+            CssToken::FunctionToken("circle".to_string()),
+            consume_ident_like_token(&mut stream)
+        );
+        assert_eq!(Some('5'), stream.peek());
     }
 }
