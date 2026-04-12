@@ -389,20 +389,22 @@ fn consume_declaration(
 
     component_values.append(&mut consume_component_list_value(
         tokens,
-        Some(CssToken::ColonToken),
+        Some(CssToken::SemicolonToken),
         nested,
     ));
 
-    if let Some(ComponentValue::PreservedToken(CssToken::DelimToken('!'))) =
-        component_values.get(component_values.len() - 2)
-    {
-        if let Some(ComponentValue::PreservedToken(CssToken::IdentToken(txt))) =
-            component_values.get(component_values.len() - 1)
+    if (component_values.len() >= 2) {
+        if let Some(ComponentValue::PreservedToken(CssToken::DelimToken('!'))) =
+            component_values.get(component_values.len() - 2)
         {
-            if txt == &String::from("important") {
-                important = true;
-                component_values.pop();
-                component_values.pop();
+            if let Some(ComponentValue::PreservedToken(CssToken::IdentToken(txt))) =
+                component_values.get(component_values.len() - 1)
+            {
+                if txt == &String::from("important") {
+                    important = true;
+                    component_values.pop();
+                    component_values.pop();
+                }
             }
         }
     }
@@ -500,6 +502,7 @@ fn consume_bad_declaration(tokens: &mut impl StreamIterator<CssToken>, nested: b
                 tokens.next();
             }
             _ => {
+                tokens.next();
                 let _ = consume_component_value(tokens);
             }
         }
@@ -729,10 +732,10 @@ mod parser_test {
     use log::{error, info};
     use url::Url;
 
-    use crate::{
-        parser::{parse_stylesheet, parse_stylesheet_url},
-        utils::test_utils::init_test_logger,
+    use crate::parser::{
+        consume_declaration, parse_stylesheet, parse_stylesheet_url, ComponentValue,
     };
+    use crate::utils::test_utils::init_test_logger;
 
     use super::{consume_at_rule, consume_function, consume_simple_bloc, normalize};
 
@@ -840,6 +843,64 @@ mod parser_test {
                 assert_eq!("StyleSheet", parsed_css.type_sheet);
                 assert_ne!(0, parsed_css.rules.len())
             }
+        }
+    }
+
+    #[test]
+    fn test_simple_declaration() {
+        init_test_logger();
+        let css = "color: red;";
+        let mut tokens = normalize(css.to_string());
+        let decl = consume_declaration(&mut tokens, false);
+        assert!(decl.is_some());
+        let decl = decl.unwrap();
+        assert_eq!(decl.name, "color");
+        assert_eq!(decl.component_values.len(), 1);
+        assert!(!decl.important);
+    }
+
+    #[test]
+    fn test_declaration_with_important() {
+        init_test_logger();
+        let css = "margin: 10px !important;";
+        let mut tokens = normalize(css.to_string());
+        let decl = consume_declaration(&mut tokens, false);
+        assert!(decl.is_some());
+        let decl = decl.unwrap();
+        assert_eq!(decl.name, "margin");
+        assert!(decl.important);
+        assert_eq!(decl.component_values.len(), 1); // "10px" seulement, "!important" est supprimé
+    }
+
+    #[test]
+    fn test_invalid_declaration_missing_colon() {
+        init_test_logger();
+        let css = "color red;";
+        let mut tokens = normalize(css.to_string());
+        let decl = consume_declaration(&mut tokens, false);
+        assert!(decl.is_none()); // Doit retourner None
+    }
+
+    #[test]
+    fn test_declaration_with_function() {
+        init_test_logger();
+        let css = "transform: rotate(45deg);";
+        let mut tokens = normalize(css.to_string());
+        let decl = consume_declaration(&mut tokens, false);
+        assert!(decl.is_some());
+        let decl = decl.unwrap();
+        assert_eq!(decl.name, "transform");
+        log::debug!("{:#?}", &decl);
+        assert_eq!(decl.component_values.len(), 1);
+        if let ComponentValue::Function {
+            name,
+            component_value,
+        } = &decl.component_values[0]
+        {
+            assert_eq!(name, "rotate");
+            assert_eq!(component_value.len(), 1);
+        } else {
+            panic!("Expected a function component value");
         }
     }
 }
