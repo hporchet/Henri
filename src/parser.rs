@@ -153,6 +153,7 @@ fn parse_string(datastream: String) -> Result<Vec<Rule>, ParseError> {
                     rules.push(rule);
                 } else {
                     debug!("at_ruled failed");
+                    token_stream.next();
                 }
             }
             _ => {
@@ -160,6 +161,7 @@ fn parse_string(datastream: String) -> Result<Vec<Rule>, ParseError> {
                     rules.push(rule);
                 } else {
                     debug!("qualified_rule failed");
+                    token_stream.next();
                 }
             }
         }
@@ -208,7 +210,10 @@ fn consume_at_rule(tokens: &mut impl StreamIterator<CssToken>, nested: bool) -> 
                             child_rules,
                         });
                     }
-                    return None;
+                    return Some(Rule::AtRule {
+                        name,
+                        component_value: prelude,
+                    });
                 }
                 CssToken::AcoladeClToken => {
                     if nested {
@@ -350,7 +355,7 @@ fn consume_block_content(
 /// 8. If decl’s name is a custom property name string, then set decl’s original text to the segment of the original source text string corresponding to the tokens of decl’s value.
 ///
 ///     Otherwise, if decl’s value contains a top-level simple block with an associated token of `<{-token>`, and also contains any other non-<whitespace-token> value, return nothing. (That is, a top-level {}-block is only allowed as the entire value of a non-custom property.)
-///     
+///
 ///     Otherwise, if decl’s name is an ASCII case-insensitive match for "unicode-range", consume the value of a unicode-range descriptor from the segment of the original source text string corresponding to the tokens returned by the consume a list of component values call, and replace decl’s value with the result.
 /// 9. If decl is valid in the current context, return it; otherwise return nothing.
 fn consume_declaration(
@@ -384,20 +389,22 @@ fn consume_declaration(
 
     component_values.append(&mut consume_component_list_value(
         tokens,
-        Some(CssToken::ColonToken),
+        Some(CssToken::SemicolonToken),
         nested,
     ));
 
-    if let Some(ComponentValue::PreservedToken(CssToken::DelimToken('!'))) =
-        component_values.get(component_values.len() - 2)
-    {
-        if let Some(ComponentValue::PreservedToken(CssToken::IdentToken(txt))) =
-            component_values.get(component_values.len() - 1)
+    if (component_values.len() >= 2) {
+        if let Some(ComponentValue::PreservedToken(CssToken::DelimToken('!'))) =
+            component_values.get(component_values.len() - 2)
         {
-            if txt == &String::from("important") {
-                important = true;
-                component_values.pop();
-                component_values.pop();
+            if let Some(ComponentValue::PreservedToken(CssToken::IdentToken(txt))) =
+                component_values.get(component_values.len() - 1)
+            {
+                if txt == &String::from("important") {
+                    important = true;
+                    component_values.pop();
+                    component_values.pop();
+                }
             }
         }
     }
@@ -424,15 +431,15 @@ fn consume_declaration(
 ///
 /// Process input:
 /// * \<eof-token>, stop token (if passed)
-///     
+///
 ///     Return values.
 /// * <}-token>
-///     
+///
 ///     If nested is true, return values.
-///     
+///
 ///     Otherwise, this is a parse error. Consume a token from input and append the result to values.
 /// * anything else
-///     
+///
 ///     Consume a component value from input, and append the result to values.
 fn consume_component_list_value(
     tokens: &mut impl StreamIterator<CssToken>,
@@ -495,6 +502,7 @@ fn consume_bad_declaration(tokens: &mut impl StreamIterator<CssToken>, nested: b
                 tokens.next();
             }
             _ => {
+                tokens.next();
                 let _ = consume_component_value(tokens);
             }
         }
@@ -525,10 +533,12 @@ fn consume_qualified_rule(
 ) -> Option<Rule> {
     let mut prelude: Vec<ComponentValue> = Vec::new();
 
-    if let Some(token) = tokens.peek() {
-        if stop_token.is_some() && token == stop_token? {
-            debug!("Stop token found");
-            return None;
+    while let Some(token) = tokens.peek() {
+        if let Some(ref stop) = stop_token {
+            if token == *stop {
+                debug!("Stop token found");
+                return None;
+            }
         }
         match token {
             CssToken::AcoladeClToken => {
@@ -537,19 +547,15 @@ fn consume_qualified_rule(
                     return None;
                 }
                 prelude.push(ComponentValue::PreservedToken(token));
+                tokens.next();
             }
             CssToken::AcoladeOpToken => {
-                discard_whitespace(tokens);
-                if let Some(CssToken::IdentToken(prefix)) = tokens.peek() {
-                    if prefix == "-" {}
-                } else {
-                    let (declarations, rules) = consume_block(tokens);
-                    return Some(Rule::QualifiedRule {
-                        component_value: Vec::new(),
-                        declarations,
-                        child_rules: rules,
-                    });
-                }
+                let (declarations, rules) = consume_block(tokens);
+                return Some(Rule::QualifiedRule {
+                    component_value: prelude,
+                    declarations,
+                    child_rules: rules,
+                });
             }
             _ => {
                 let val = consume_component_value(tokens);
@@ -557,6 +563,7 @@ fn consume_qualified_rule(
                     prelude.push(val.ok()?);
                 } else {
                     error!("Error when parsing a component value {:#?}", val.err()?);
+                    return None;
                 }
             }
         }
@@ -722,13 +729,13 @@ fn normalize(input: String) -> TokenStream {
 mod parser_test {
     use std::{env, fs::File, io::Read};
 
-    use log::{debug, error, info};
+    use log::{error, info};
     use url::Url;
 
-    use crate::{
-        parser::{parse_stylesheet, parse_stylesheet_url},
-        utils::test_utils::init_test_logger,
+    use crate::parser::{
+        consume_declaration, parse_stylesheet, parse_stylesheet_url, ComponentValue,
     };
+    use crate::utils::test_utils::init_test_logger;
 
     use super::{consume_at_rule, consume_function, consume_simple_bloc, normalize};
 
@@ -799,7 +806,7 @@ mod parser_test {
         match res {
             None => {
                 error!("error no rule can be parsed");
-                
+
                 assert!(false);
             }
             Some(_rule) => {
@@ -836,6 +843,64 @@ mod parser_test {
                 assert_eq!("StyleSheet", parsed_css.type_sheet);
                 assert_ne!(0, parsed_css.rules.len())
             }
+        }
+    }
+
+    #[test]
+    fn test_simple_declaration() {
+        init_test_logger();
+        let css = "color: red;";
+        let mut tokens = normalize(css.to_string());
+        let decl = consume_declaration(&mut tokens, false);
+        assert!(decl.is_some());
+        let decl = decl.unwrap();
+        assert_eq!(decl.name, "color");
+        assert_eq!(decl.component_values.len(), 1);
+        assert!(!decl.important);
+    }
+
+    #[test]
+    fn test_declaration_with_important() {
+        init_test_logger();
+        let css = "margin: 10px !important;";
+        let mut tokens = normalize(css.to_string());
+        let decl = consume_declaration(&mut tokens, false);
+        assert!(decl.is_some());
+        let decl = decl.unwrap();
+        assert_eq!(decl.name, "margin");
+        assert!(decl.important);
+        assert_eq!(decl.component_values.len(), 1); // "10px" seulement, "!important" est supprimé
+    }
+
+    #[test]
+    fn test_invalid_declaration_missing_colon() {
+        init_test_logger();
+        let css = "color red;";
+        let mut tokens = normalize(css.to_string());
+        let decl = consume_declaration(&mut tokens, false);
+        assert!(decl.is_none()); // Doit retourner None
+    }
+
+    #[test]
+    fn test_declaration_with_function() {
+        init_test_logger();
+        let css = "transform: rotate(45deg);";
+        let mut tokens = normalize(css.to_string());
+        let decl = consume_declaration(&mut tokens, false);
+        assert!(decl.is_some());
+        let decl = decl.unwrap();
+        assert_eq!(decl.name, "transform");
+        log::debug!("{:#?}", &decl);
+        assert_eq!(decl.component_values.len(), 1);
+        if let ComponentValue::Function {
+            name,
+            component_value,
+        } = &decl.component_values[0]
+        {
+            assert_eq!(name, "rotate");
+            assert_eq!(component_value.len(), 1);
+        } else {
+            panic!("Expected a function component value");
         }
     }
 }
