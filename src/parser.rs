@@ -153,6 +153,7 @@ fn parse_string(datastream: String) -> Result<Vec<Rule>, ParseError> {
                     rules.push(rule);
                 } else {
                     debug!("at_ruled failed");
+                    token_stream.next();
                 }
             }
             _ => {
@@ -160,6 +161,7 @@ fn parse_string(datastream: String) -> Result<Vec<Rule>, ParseError> {
                     rules.push(rule);
                 } else {
                     debug!("qualified_rule failed");
+                    token_stream.next();
                 }
             }
         }
@@ -208,7 +210,10 @@ fn consume_at_rule(tokens: &mut impl StreamIterator<CssToken>, nested: bool) -> 
                             child_rules,
                         });
                     }
-                    return None;
+                    return Some(Rule::AtRule {
+                        name,
+                        component_value: prelude,
+                    });
                 }
                 CssToken::AcoladeClToken => {
                     if nested {
@@ -350,7 +355,7 @@ fn consume_block_content(
 /// 8. If decl’s name is a custom property name string, then set decl’s original text to the segment of the original source text string corresponding to the tokens of decl’s value.
 ///
 ///     Otherwise, if decl’s value contains a top-level simple block with an associated token of `<{-token>`, and also contains any other non-<whitespace-token> value, return nothing. (That is, a top-level {}-block is only allowed as the entire value of a non-custom property.)
-///     
+///
 ///     Otherwise, if decl’s name is an ASCII case-insensitive match for "unicode-range", consume the value of a unicode-range descriptor from the segment of the original source text string corresponding to the tokens returned by the consume a list of component values call, and replace decl’s value with the result.
 /// 9. If decl is valid in the current context, return it; otherwise return nothing.
 fn consume_declaration(
@@ -424,15 +429,15 @@ fn consume_declaration(
 ///
 /// Process input:
 /// * \<eof-token>, stop token (if passed)
-///     
+///
 ///     Return values.
 /// * <}-token>
-///     
+///
 ///     If nested is true, return values.
-///     
+///
 ///     Otherwise, this is a parse error. Consume a token from input and append the result to values.
 /// * anything else
-///     
+///
 ///     Consume a component value from input, and append the result to values.
 fn consume_component_list_value(
     tokens: &mut impl StreamIterator<CssToken>,
@@ -525,10 +530,12 @@ fn consume_qualified_rule(
 ) -> Option<Rule> {
     let mut prelude: Vec<ComponentValue> = Vec::new();
 
-    if let Some(token) = tokens.peek() {
-        if stop_token.is_some() && token == stop_token? {
-            debug!("Stop token found");
-            return None;
+    while let Some(token) = tokens.peek() {
+        if let Some(ref stop) = stop_token {
+            if token == *stop {
+                debug!("Stop token found");
+                return None;
+            }
         }
         match token {
             CssToken::AcoladeClToken => {
@@ -537,19 +544,15 @@ fn consume_qualified_rule(
                     return None;
                 }
                 prelude.push(ComponentValue::PreservedToken(token));
+                tokens.next();
             }
             CssToken::AcoladeOpToken => {
-                discard_whitespace(tokens);
-                if let Some(CssToken::IdentToken(prefix)) = tokens.peek() {
-                    if prefix == "-" {}
-                } else {
-                    let (declarations, rules) = consume_block(tokens);
-                    return Some(Rule::QualifiedRule {
-                        component_value: Vec::new(),
-                        declarations,
-                        child_rules: rules,
-                    });
-                }
+                let (declarations, rules) = consume_block(tokens);
+                return Some(Rule::QualifiedRule {
+                    component_value: prelude,
+                    declarations,
+                    child_rules: rules,
+                });
             }
             _ => {
                 let val = consume_component_value(tokens);
@@ -557,6 +560,7 @@ fn consume_qualified_rule(
                     prelude.push(val.ok()?);
                 } else {
                     error!("Error when parsing a component value {:#?}", val.err()?);
+                    return None;
                 }
             }
         }
@@ -722,7 +726,7 @@ fn normalize(input: String) -> TokenStream {
 mod parser_test {
     use std::{env, fs::File, io::Read};
 
-    use log::{debug, error, info};
+    use log::{error, info};
     use url::Url;
 
     use crate::{
@@ -799,7 +803,7 @@ mod parser_test {
         match res {
             None => {
                 error!("error no rule can be parsed");
-                
+
                 assert!(false);
             }
             Some(_rule) => {

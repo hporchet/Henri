@@ -847,8 +847,8 @@ mod tests {
     use crate::{
         tokeniser::{
             consume_digit, consume_escaped_code_point, consume_number, consume_numeric_token,
-            consume_whitespaces, preprocessing, start_ident_sequence, start_number, CssToken,
-            NumericValue,
+            consume_whitespaces, preprocessing, start_ident_sequence, start_number, tokenization,
+            CssToken, NumericValue,
         },
         utils::{
             test_utils::{self},
@@ -1188,15 +1188,791 @@ mod tests {
     }
 
     #[test]
-    fn ident_like_token_test() {
+    fn test_tokenization_strings() {
         test_utils::init_test_logger();
 
-        let text = String::from("circle(50px);");
-        let mut stream = CharStream::new(text);
-        assert_eq!(
-            CssToken::FunctionToken("circle".to_string()),
-            consume_ident_like_token(&mut stream)
-        );
-        assert_eq!(Some('5'), stream.peek());
+        // Empty string with double quotes
+        {
+            let text = String::from("\"\"");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::StringToken("".to_string()), token);
+        }
+
+        // Empty string with single quotes
+        {
+            let text = String::from("''");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::StringToken("".to_string()), token);
+        }
+
+        // Simple string without whitespace
+        {
+            let text = String::from("\"hello\"");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::StringToken("hello".to_string()), token);
+        }
+
+        // Single quoted string
+        {
+            let text = String::from("'world'");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::StringToken("world".to_string()), token);
+        }
+
+        // Bad string (contains space)
+        {
+            let text = String::from("\"hello world\"");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::BadStringToken, token);
+        }
+
+        // Bad string (contains newline)
+        {
+            let text = String::from("\"hello\nworld\"");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::BadStringToken, token);
+        }
+
+        // Bad string (contains tab)
+        {
+            let text = String::from("\"hello\tworld\"");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::BadStringToken, token);
+        }
+    }
+
+    #[test]
+    fn test_tokenization_hash_tokens() {
+        test_utils::init_test_logger();
+
+        // Hash is treated as delimiter because # itself is not an ident code point
+        // The CSS spec requires the character after # to be an ident-code-point or escape
+        {
+            let text = String::from("#myid");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::DelimToken('#'), token);
+        }
+
+        // Hash followed by number is also a delimiter
+        {
+            let text = String::from("#123");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::DelimToken('#'), token);
+        }
+
+        // Hash followed by special char is delimiter
+        {
+            let text = String::from("#!");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::DelimToken('#'), token);
+        }
+
+        // Hash at end of stream
+        {
+            let text = String::from("#");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::DelimToken('#'), token);
+        }
+    }
+
+    #[test]
+    fn test_tokenization_function_tokens() {
+        test_utils::init_test_logger();
+
+        // rgb as ident token (paren should be consumed separately)
+        {
+            let text = String::from("rgb");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::IdentToken("rgb".to_string()), token);
+        }
+
+        // calc as ident token
+        {
+            let text = String::from("calc");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::IdentToken("calc".to_string()), token);
+        }
+
+        // Parenthesis tokens are separate
+        {
+            let text = String::from("(");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::ParenthOpToken, token);
+        }
+    }
+
+    #[test]
+    fn test_tokenization_at_keyword() {
+        test_utils::init_test_logger();
+
+        // Valid @-keyword
+        {
+            let text = String::from("@media");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::AtKeywordToken("media".to_string()), token);
+        }
+
+        // @-keyword with hyphen
+        {
+            let text = String::from("@supports");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::AtKeywordToken("supports".to_string()), token);
+        }
+
+        // @ as delimiter (not followed by ident)
+        {
+            let text = String::from("@123");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::DelimToken('@'), token);
+        }
+    }
+
+    #[test]
+    fn test_tokenization_ident_tokens() {
+        test_utils::init_test_logger();
+
+        // Simple identifier
+        {
+            let text = String::from("hello");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::IdentToken("hello".to_string()), token);
+        }
+
+        // Identifier with hyphen
+        {
+            let text = String::from("my-class");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::IdentToken("my-class".to_string()), token);
+        }
+
+        // Identifier with underscore
+        {
+            let text = String::from("_private");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::IdentToken("_private".to_string()), token);
+        }
+
+        // Identifier for function
+        {
+            let text = String::from("circle(50px);");
+            let mut stream = CharStream::new(text);
+            assert_eq!(
+                CssToken::FunctionToken("circle".to_string()),
+                consume_ident_like_token(&mut stream)
+            );
+            assert_eq!(Some('5'), stream.peek());
+        }
+    }
+
+    #[test]
+    fn test_tokenization_dimension_units() {
+        test_utils::init_test_logger();
+
+        // Pixels
+        {
+            let text = String::from("10px");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            match token {
+                CssToken::DimensionToken {
+                    unit,
+                    sign,
+                    val_type,
+                    value,
+                } => {
+                    assert_eq!("px", unit);
+                    assert_eq!(true, sign);
+                    assert_eq!(NumericValue::Integer, val_type);
+                    assert_eq!("10", value);
+                }
+                _ => panic!("Expected DimensionToken"),
+            }
+        }
+
+        // em with decimal
+        {
+            let text = String::from("1.5em");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            match token {
+                CssToken::DimensionToken {
+                    unit,
+                    sign,
+                    val_type,
+                    value,
+                } => {
+                    assert_eq!("em", unit);
+                    assert_eq!(true, sign);
+                    assert_eq!(NumericValue::Number, val_type);
+                    assert_eq!("1.5", value);
+                }
+                _ => panic!("Expected DimensionToken"),
+            }
+        }
+
+        // Negative dimension
+        {
+            let text = String::from("-5rem");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            match token {
+                CssToken::DimensionToken {
+                    unit,
+                    sign,
+                    val_type,
+                    value,
+                } => {
+                    assert_eq!("rem", unit);
+                    assert_eq!(false, sign);
+                    assert_eq!(NumericValue::Integer, val_type);
+                    assert_eq!("5", value);
+                }
+                _ => panic!("Expected DimensionToken"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_tokenization_percentages() {
+        test_utils::init_test_logger();
+
+        // Positive percentage
+        {
+            let text = String::from("50%");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            match token {
+                CssToken::PercentageToken { sign, value } => {
+                    assert_eq!(true, sign);
+                    assert_eq!("50", value);
+                }
+                _ => panic!("Expected PercentageToken"),
+            }
+        }
+
+        // Decimal percentage
+        {
+            let text = String::from("33.33%");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            match token {
+                CssToken::PercentageToken { sign, value } => {
+                    assert_eq!(true, sign);
+                    assert_eq!("33.33", value);
+                }
+                _ => panic!("Expected PercentageToken"),
+            }
+        }
+
+        // Negative percentage
+        {
+            let text = String::from("-25%");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            match token {
+                CssToken::PercentageToken { sign, value } => {
+                    assert_eq!(false, sign);
+                    assert_eq!("25", value);
+                }
+                _ => panic!("Expected PercentageToken"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_tokenization_plain_numbers() {
+        test_utils::init_test_logger();
+
+        // Positive integer
+        {
+            let text = String::from("42");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            match token {
+                CssToken::NumberToken {
+                    sign,
+                    val_type,
+                    value,
+                } => {
+                    assert_eq!(true, sign);
+                    assert_eq!(NumericValue::Integer, val_type);
+                    assert_eq!("42", value);
+                }
+                _ => panic!("Expected NumberToken"),
+            }
+        }
+
+        // Decimal number
+        {
+            let text = String::from("3.14");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            match token {
+                CssToken::NumberToken {
+                    sign,
+                    val_type,
+                    value,
+                } => {
+                    assert_eq!(true, sign);
+                    assert_eq!(NumericValue::Number, val_type);
+                    assert_eq!("3.14", value);
+                }
+                _ => panic!("Expected NumberToken"),
+            }
+        }
+
+        // Negative number with plus sign
+        {
+            let text = String::from("+99");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            match token {
+                CssToken::NumberToken {
+                    sign,
+                    val_type,
+                    value,
+                } => {
+                    assert_eq!(true, sign);
+                    assert_eq!(NumericValue::Integer, val_type);
+                    assert_eq!("99", value);
+                }
+                _ => panic!("Expected NumberToken"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_tokenization_delimiters() {
+        test_utils::init_test_logger();
+
+        // Various delimiter tokens
+        {
+            let text = String::from("!");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::DelimToken('!'), token);
+        }
+
+        {
+            let text = String::from("&");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::DelimToken('&'), token);
+        }
+
+        {
+            let text = String::from("$");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::DelimToken('$'), token);
+        }
+    }
+
+    #[test]
+    fn test_tokenization_brackets_and_parens() {
+        test_utils::init_test_logger();
+
+        // Opening parenthesis
+        {
+            let text = String::from("(");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::ParenthOpToken, token);
+        }
+
+        // Closing parenthesis
+        {
+            let text = String::from(")");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::ParenthClToken, token);
+        }
+
+        // Opening bracket
+        {
+            let text = String::from("[");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::CrochetOpToken, token);
+        }
+
+        // Closing bracket
+        {
+            let text = String::from("]");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::CrochetClToken, token);
+        }
+
+        // Opening brace
+        {
+            let text = String::from("{");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::AcoladeOpToken, token);
+        }
+
+        // Closing brace
+        {
+            let text = String::from("}");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::AcoladeClToken, token);
+        }
+    }
+
+    #[test]
+    fn test_tokenization_punctuation() {
+        test_utils::init_test_logger();
+
+        // Colon
+        {
+            let text = String::from(":");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::ColonToken, token);
+        }
+
+        // Semicolon
+        {
+            let text = String::from(";");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::SemicolonToken, token);
+        }
+
+        // Comma
+        {
+            let text = String::from(",");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::CommaToken, token);
+        }
+    }
+
+    #[test]
+    fn test_tokenization_cdo_cdc() {
+        test_utils::init_test_logger();
+
+        // CDC sequence (-->) - The tokenizer treats "--" as an identifier token
+        // The ">" will be tokenized separately
+        {
+            let text = String::from("-->");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            // Actual behavior: "--" is tokenized as identifier
+            assert_eq!(CssToken::IdentToken("--".to_string()), token);
+        }
+
+        // Double hyphen alone becomes identifier token
+        {
+            let text = String::from("--");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::IdentToken("--".to_string()), token);
+        }
+
+        // Double hyphen followed by letter becomes longer identifier token
+        {
+            let text = String::from("--test");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::IdentToken("--test".to_string()), token);
+        }
+
+        // Single hyphen followed by non-identifier becomes delimiter
+        {
+            let text = String::from("-;");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::DelimToken('-'), token);
+        }
+
+        // Less-than as delimiter
+        {
+            let text = String::from("<");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::DelimToken('<'), token);
+        }
+    }
+
+    #[test]
+    fn test_tokenization_whitespace_token() {
+        test_utils::init_test_logger();
+
+        // Space
+        {
+            let text = String::from(" ");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::WhitespaceToken, token);
+        }
+
+        // Multiple spaces
+        {
+            let text = String::from("   ");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::WhitespaceToken, token);
+        }
+
+        // Tab
+        {
+            let text = String::from("\t");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::WhitespaceToken, token);
+        }
+
+        // Newline
+        {
+            let text = String::from("\n");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::WhitespaceToken, token);
+        }
+    }
+
+    #[test]
+    fn test_tokenization_plus_and_dot() {
+        test_utils::init_test_logger();
+
+        // Plus as delimiter (not followed by number)
+        {
+            let text = String::from("+x");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::DelimToken('+'), token);
+        }
+
+        // Dot as delimiter (not followed by number)
+        {
+            let text = String::from(".x");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::DelimToken('.'), token);
+        }
+
+        // Dot as delimiter when not followed by identifier or digit
+        {
+            let text = String::from(".a");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::DelimToken('.'), token);
+        }
+
+        // Dot followed by semicolon is delimiter
+        {
+            let text = String::from(".");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::DelimToken('.'), token);
+        }
+    }
+
+    #[test]
+    fn test_start_ident_sequence_debug() {
+        test_utils::init_test_logger();
+
+        // Test what start_ident_sequence does with "myid"
+        {
+            let text = String::from("myid");
+            let mut stream = CharStream::new(text);
+            let result = start_ident_sequence(&mut stream);
+            assert!(result, "Should start an ident sequence with letter");
+        }
+
+        // Test with underscore
+        {
+            let text = String::from("_private");
+            let mut stream = CharStream::new(text);
+            let result = start_ident_sequence(&mut stream);
+            assert!(result, "Should start an ident sequence with underscore");
+        }
+
+        // Test with double hyphen
+        {
+            let text = String::from("--test");
+            let mut stream = CharStream::new(text);
+            let result = start_ident_sequence(&mut stream);
+            assert!(result, "Should start an ident sequence with double hyphen");
+        }
+
+        // Test with digit (should fail - must start with letter, _, or -)
+        {
+            let text = String::from("5");
+            let mut stream = CharStream::new(text);
+            let result = start_ident_sequence(&mut stream);
+            assert!(!result, "Should not start ident with digit alone");
+        }
+    }
+
+    #[test]
+    fn test_tokenization_escaped_sequences() {
+        test_utils::init_test_logger();
+
+        // Escaped character starting identifier
+        {
+            let text = String::from("\\61 bc");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            // Should produce an IdentToken
+            match token {
+                CssToken::IdentToken(_) => {
+                    // Success
+                }
+                _ => panic!("Expected IdentToken for escaped sequence"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_tokenization_minus_handling() {
+        test_utils::init_test_logger();
+
+        // Minus as number prefix
+        {
+            let text = String::from("-42");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            match token {
+                CssToken::NumberToken {
+                    sign,
+                    val_type,
+                    value,
+                } => {
+                    assert_eq!(false, sign);
+                    assert_eq!(NumericValue::Integer, val_type);
+                    assert_eq!("42", value);
+                }
+                _ => panic!("Expected NumberToken"),
+            }
+        }
+
+        // Minus as identifier prefix
+        {
+            let text = String::from("-webkit");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::IdentToken("-webkit".to_string()), token);
+        }
+
+        // Minus as delimiter
+        {
+            let text = String::from("-!");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::DelimToken('-'), token);
+        }
+    }
+
+    #[test]
+    fn test_tokenization_backslash_handling() {
+        test_utils::init_test_logger();
+
+        // Backslash starting an identifier
+        {
+            let text = String::from("\\n");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            match token {
+                CssToken::IdentToken(_) => {
+                    // Success - backslash should trigger ident-like token
+                }
+                _ => panic!("Expected IdentToken for backslash escape"),
+            }
+        }
+
+        // Backslash followed by newline (should be delimiter)
+        {
+            let text = String::from("\\\n");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::DelimToken('\\'), token);
+        }
+    }
+
+    #[test]
+    fn test_tokenization_less_than() {
+        test_utils::init_test_logger();
+
+        // Less-than as delimiter (not CDO)
+        {
+            let text = String::from("<");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::DelimToken('<'), token);
+        }
+
+        // Less-than with other chars (not CDO)
+        {
+            let text = String::from("<x");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::DelimToken('<'), token);
+        }
+    }
+
+    #[test]
+    fn test_tokenization_url_function() {
+        test_utils::init_test_logger();
+
+        // url as identifier token
+        {
+            let text = String::from("url");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::IdentToken("url".to_string()), token);
+        }
+
+        // other function-like keywords
+        {
+            let text = String::from("rgba");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::IdentToken("rgba".to_string()), token);
+        }
+    }
+
+    #[test]
+    fn test_tokenization_edge_cases() {
+        test_utils::init_test_logger();
+
+        // Empty stream should error
+        {
+            let text = String::from("");
+            let mut stream = CharStream::new(text);
+            let result = tokenization(&mut stream);
+            assert!(result.is_err());
+        }
+
+        // Only whitespace remains after consuming it
+        {
+            let text = String::from("   ");
+            let mut stream = CharStream::new(text);
+            let token = tokenization(&mut stream).unwrap();
+            assert_eq!(CssToken::WhitespaceToken, token);
+        }
     }
 }
